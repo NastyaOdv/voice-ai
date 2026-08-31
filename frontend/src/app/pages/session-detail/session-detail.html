@@ -1,0 +1,161 @@
+<a mat-button routerLink="/sessions" class="back-link">
+  <mat-icon>arrow_back</mat-icon>
+  All sessions
+</a>
+
+@if (loading()) {
+  <div class="state-center">
+    <mat-spinner diameter="40" />
+  </div>
+} @else if (error()) {
+  <div class="state-center">
+    <p class="error-text">{{ error() }}</p>
+    <a mat-stroked-button routerLink="/sessions">Back to sessions</a>
+  </div>
+} @else if (session(); as s) {
+  <header class="detail-header">
+    <div>
+      <h1>Session</h1>
+      <span class="detail-date">{{ s.created_at | date: 'medium' }}</span>
+    </div>
+    <mat-chip-set>
+      <mat-chip [class.chip-active]="s.status === 'active'"
+                [class.chip-closed]="s.status === 'closed'" [disabled]="true">
+        {{ s.status }}
+      </mat-chip>
+    </mat-chip-set>
+  </header>
+
+  @if (s.summary) {
+    <mat-card appearance="outlined" class="summary-card">
+      <mat-card-content>{{ s.summary }}</mat-card-content>
+    </mat-card>
+  }
+
+  @if (s.turns.length === 0) {
+    <mat-card appearance="outlined" class="empty-card">
+      <mat-card-content>
+        <mat-icon class="empty-icon">forum</mat-icon>
+        <p>No turns yet. Say something to start the conversation.</p>
+      </mat-card-content>
+    </mat-card>
+  } @else {
+    <div class="turns">
+      @if (submitting()) {
+        <div class="turn turn-user turn-pending">
+          <div class="turn-role">
+            <mat-icon>person</mat-icon>
+            <span>You</span>
+          </div>
+          <p class="turn-text pending-text">
+            <mat-spinner diameter="16" />
+            Transcribing and generating a reply…
+          </p>
+        </div>
+      }
+      @for (turn of s.turns; track turn.id) {
+        <div class="turn" [class.turn-user]="turn.role === 'user'"
+             [class.turn-assistant]="turn.role === 'assistant'">
+          <div class="turn-role">
+            <mat-icon>{{ turn.role === 'user' ? 'person' : 'record_voice_over' }}</mat-icon>
+            <span>{{ turn.role === 'user' ? 'You' : 'Tutor' }}</span>
+            @if (turn.language) {
+              <span class="turn-lang">{{ turn.language }}</span>
+            }
+          </div>
+
+          <p class="turn-text">{{ turn.text }}</p>
+
+          @if (turn.audio_url) {
+            <audio class="turn-audio" controls [src]="audioSrc(turn.audio_url)"></audio>
+          }
+
+          @if (turn.corrections.length > 0) {
+            <div class="corrections">
+              <div class="corrections-title">
+                <mat-icon>spellcheck</mat-icon>
+                Grammar notes
+              </div>
+              @for (c of turn.corrections; track c.id) {
+                <div class="correction">
+                  @if (c.topic) {
+                    <span class="correction-topic">{{ c.topic }}</span>
+                  }
+                  <p class="correction-line">
+                    <span class="you-said">{{ c.you_said }}</span>
+                    <mat-icon class="arrow">arrow_forward</mat-icon>
+                    <span class="better">{{ c.better }}</span>
+                  </p>
+                  <p class="correction-note">{{ c.note }}</p>
+                </div>
+              }
+            </div>
+          }
+        </div>
+      }
+    </div>
+  }
+
+  @if (s.status === 'active') {
+    <div class="mode-switch">
+      <mat-button-toggle-group [value]="mode()"
+                               (change)="setMode($event.value)"
+                               aria-label="Practice mode" hideSingleSelectionIndicator>
+        <mat-button-toggle value="v1">
+          <mat-icon>graphic_eq</mat-icon>
+          Walkie-talkie (v1)
+        </mat-button-toggle>
+        <mat-button-toggle value="v2">
+          <mat-icon>wifi_tethering</mat-icon>
+          Realtime (v2)
+        </mat-button-toggle>
+      </mat-button-toggle-group>
+    </div>
+
+    @if (mode() === 'v2') {
+      <app-realtime-call [sessionId]="sessionId" />
+    } @else {
+    <mat-card appearance="outlined" class="recorder-card">
+      <mat-card-content class="recorder">
+        @if (recording()) {
+          <button mat-fab extended color="warn" (click)="stopRecording()">
+            <mat-icon>stop</mat-icon>
+            Stop &amp; send
+          </button>
+          <span class="rec-indicator">
+            <span class="rec-dot"></span> Recording…
+          </span>
+        } @else {
+          <button mat-fab extended color="primary"
+                  [disabled]="submitting()" (click)="startRecording()">
+            <mat-icon>mic</mat-icon>
+            Record
+          </button>
+
+          <span class="recorder-or">or</span>
+
+          <button mat-stroked-button [disabled]="submitting()"
+                  (click)="fileInput.click()">
+            <mat-icon>upload_file</mat-icon>
+            Upload audio file
+          </button>
+          <input #fileInput type="file" accept="audio/*" hidden
+                 (change)="onFileSelected($event)" />
+        }
+
+        @if (submitting()) {
+          <span class="recorder-status">
+            <mat-spinner diameter="18" /> Processing…
+          </span>
+        }
+      </mat-card-content>
+
+      @if (recordError()) {
+        <mat-card-content class="recorder-error">{{ recordError() }}</mat-card-content>
+      }
+    </mat-card>
+    }
+  } @else {
+    <p class="closed-note">This session is closed — no new turns can be added.</p>
+  }
+}

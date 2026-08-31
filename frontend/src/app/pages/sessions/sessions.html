@@ -1,0 +1,52 @@
+<header class="sessions-header">
+  <div>
+    <h1>Your sessions</h1>
+    <p class="subtitle">Every practice conversation and the grammar notes it produced.</p>
+  </div>
+  <button mat-flat-button color="primary" (click)="startSession()" [disabled]="starting()">
+    <mat-icon>add</mat-icon>
+    New session
+  </button>
+</header>
+
+@if (loading()) {
+  <div class="state-center">
+    <mat-spinner diameter="40" />
+  </div>
+} @else if (error()) {
+  <div class="state-center">
+    <p class="error-text">{{ error() }}</p>
+    <button mat-stroked-button (click)="load()">Retry</button>
+  </div>
+} @else if (items().length === 0) {
+  <mat-card class="empty-card" appearance="outlined">
+    <mat-card-content>
+      <mat-icon class="empty-icon">forum</mat-icon>
+      <h2>No sessions yet</h2>
+      <p>Start your first conversation to see it here.</p>
+    </mat-card-content>
+  </mat-card>
+} @else {
+  <div class="session-list">
+    @for (session of items(); track session.id) {
+      <mat-card class="session-card" appearance="outlined"
+                [routerLink]="['/sessions', session.id]">
+        <mat-card-content class="session-content">
+          <div class="session-main">
+            <span class="session-date">{{ session.created_at | date: 'medium' }}</span>
+            <p class="session-summary">
+              {{ session.summary || 'No summary yet.' }}
+            </p>
+          </div>
+          <mat-chip-set>
+            <mat-chip [class.chip-active]="session.status === 'active'"
+                      [class.chip-closed]="session.status === 'closed'"
+                      [disabled]="true">
+              {{ session.status }}
+            </mat-chip>
+          </mat-chip-set>
+        </mat-card-content>
+      </mat-card>
+    }
+  </div>
+}

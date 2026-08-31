@@ -1,0 +1,13 @@
+services:
+  tts-worker:
+    build: .
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@orchestrator-rabbitmq:5672/
+      TTS_QUEUE: tts.rpc
+    networks:
+      - webeng
+
+networks:
+  # Shared across all services. Create it once: `docker network create webeng`
+  webeng:
+    external: true

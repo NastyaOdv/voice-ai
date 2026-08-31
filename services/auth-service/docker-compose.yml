@@ -1,0 +1,53 @@
+services:
+  auth-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: auth_service
+    ports:
+      # Host 5433 to avoid clashing with user-service's Postgres on 5432.
+      - "5433:5432"
+    volumes:
+      - auth_db_data:/var/lib/postgresql/data
+    networks:
+      - webeng
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d auth_service"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  auth-api:
+    build: .
+    environment:
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_DATABASE: auth_service
+      DB_HOST: auth-db
+      DB_PORT: "5432"
+      DB_SSLMODE: disable
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8001/auth/google/callback}
+    ports:
+      # Host 8001 to avoid clashing with user-service's API on 8000.
+      - "8001:8000"
+    volumes:
+      # Persist the generated RS256 keys across restarts.
+      - auth_keys:/app/keys
+    networks:
+      - webeng
+    depends_on:
+      auth-db:
+        condition: service_healthy
+
+networks:
+  # Shared across all services so they can reach each other by name.
+  # Create it once: `docker network create webeng`
+  webeng:
+    external: true
+
+volumes:
+  auth_db_data:
+  auth_keys:

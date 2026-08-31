@@ -1,0 +1,15 @@
+services:
+  llm-worker:
+    build: .
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@orchestrator-rabbitmq:5672/
+      LLM_QUEUE: llm.rpc
+      LLM_MODEL: ${LLM_MODEL:-claude-opus-5}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    networks:
+      - webeng
+
+networks:
+  # Shared across all services. Create it once: `docker network create webeng`
+  webeng:
+    external: true

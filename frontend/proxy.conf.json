@@ -1,0 +1,21 @@
+{
+  "/api/auth": {
+    "target": "http://localhost:8001",
+    "secure": false,
+    "changeOrigin": true,
+    "pathRewrite": { "^/api": "" }
+  },
+  "/api/sessions": {
+    "target": "http://localhost:8002",
+    "secure": false,
+    "changeOrigin": true,
+    "ws": true,
+    "pathRewrite": { "^/api": "" }
+  },
+  "/api/mistakes": {
+    "target": "http://localhost:8002",
+    "secure": false,
+    "changeOrigin": true,
+    "pathRewrite": { "^/api": "" }
+  }
+}

@@ -1,0 +1,46 @@
+services:
+  user-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: user_service
+    ports:
+      - "5432:5432"
+    volumes:
+      - user_db_data:/var/lib/postgresql/data
+    networks:
+      - webeng
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d user_service"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  user-api:
+    build: .
+    environment:
+      # Inside the compose network hosts are the service names, not localhost.
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_DATABASE: user_service
+      DB_HOST: user-db
+      DB_PORT: "5432"
+      DB_SSLMODE: disable
+      AUTH_PUBLIC_KEY_URL: http://auth-api:8000/auth/public-key
+    ports:
+      - "8000:8000"
+    networks:
+      - webeng
+    depends_on:
+      user-db:
+        condition: service_healthy
+
+networks:
+  # Shared across all services so they can reach each other by name.
+  # Create it once: `docker network create webeng`
+  webeng:
+    external: true
+
+volumes:
+  user_db_data:

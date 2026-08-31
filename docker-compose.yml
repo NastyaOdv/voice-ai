@@ -1,0 +1,10 @@
+# Root compose: brings up all services on the shared `webeng` network.
+# One-time setup:  docker network create webeng
+# Then:            docker compose up --build
+include:
+  - services/auth-service/docker-compose.yml
+  - services/user-service/docker-compose.yml
+  - services/orchestrator-service/docker-compose.yml
+  - services/stt-service/docker-compose.yml
+  - services/llm-service/docker-compose.yml
+  - services/tts-service/docker-compose.yml

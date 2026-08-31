@@ -1,0 +1,50 @@
+<div class="notes-header">
+  <div class="notes-title">
+    <mat-icon>menu_book</mat-icon>
+    <h2>Notes</h2>
+  </div>
+  <button mat-icon-button (click)="reload()" [disabled]="loading()" aria-label="Refresh notes">
+    <mat-icon>refresh</mat-icon>
+  </button>
+</div>
+<p class="notes-subtitle">Your grammar mistakes, grouped by topic.</p>
+
+@if (loading()) {
+  <div class="notes-state">
+    <mat-spinner diameter="32" />
+  </div>
+} @else if (error()) {
+  <div class="notes-state">
+    <p class="error-text">{{ error() }}</p>
+    <button mat-stroked-button (click)="reload()">Retry</button>
+  </div>
+} @else if (topics().length === 0) {
+  <div class="notes-state">
+    <mat-icon class="empty-icon">spellcheck</mat-icon>
+    <p>No mistakes yet. Keep practising!</p>
+  </div>
+} @else {
+  <mat-accordion multi>
+    @for (topic of topics(); track topic.topic) {
+      <mat-expansion-panel>
+        <mat-expansion-panel-header>
+          <mat-panel-title>{{ topic.topic }}</mat-panel-title>
+          <mat-panel-description>
+            <span class="count-badge">{{ topic.count }}</span>
+          </mat-panel-description>
+        </mat-expansion-panel-header>
+
+        @for (m of topic.mistakes; track $index) {
+          <div class="note-item">
+            <p class="note-line">
+              <span class="you-said">{{ m.example }}</span>
+              <mat-icon class="arrow">arrow_forward</mat-icon>
+              <span class="better">{{ m.better }}</span>
+            </p>
+            <p class="note-text">{{ m.note }}</p>
+          </div>
+        }
+      </mat-expansion-panel>
+    }
+  </mat-accordion>
+}

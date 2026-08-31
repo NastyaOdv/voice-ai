@@ -1,0 +1,83 @@
+services:
+  orchestrator-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: orchestrator_service
+    ports:
+      - "5434:5432"
+    volumes:
+      - orchestrator_db_data:/var/lib/postgresql/data
+    networks:
+      - webeng
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d orchestrator_service"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  orchestrator-redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - webeng
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  orchestrator-rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # management UI
+    networks:
+      - webeng
+    healthcheck:
+      # check_port_connectivity confirms the AMQP listener is actually accepting
+      # connections (plain `ping` reports healthy before the listener is bound).
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  orchestrator-api:
+    build: .
+    environment:
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_DATABASE: orchestrator_service
+      DB_HOST: orchestrator-db
+      DB_PORT: "5432"
+      DB_SSLMODE: disable
+      REDIS_URL: redis://orchestrator-redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@orchestrator-rabbitmq:5672/
+      AUTH_PUBLIC_KEY_URL: http://auth-api:8000/auth/public-key
+      STORAGE_DIR: /app/storage/audio
+      ENV: dev
+    ports:
+      - "8002:8000"
+    volumes:
+      - orchestrator_audio:/app/storage/audio
+    networks:
+      - webeng
+    depends_on:
+      orchestrator-db:
+        condition: service_healthy
+      orchestrator-rabbitmq:
+        condition: service_healthy
+      orchestrator-redis:
+        condition: service_healthy
+
+networks:
+  # Shared across all services. Create it once: `docker network create webeng`
+  webeng:
+    external: true
+
+volumes:
+  orchestrator_db_data:
+  orchestrator_audio:
