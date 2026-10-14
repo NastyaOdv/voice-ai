@@ -168,6 +168,14 @@ export class RealtimeCall implements OnDestroy {
   private playbackCtx: AudioContext | null = null;
   private playHead = 0;
 
+  // Mute-while-speaking: while the tutor is talking, the mic would otherwise capture the
+  // reply from the speakers and send it back as the user's turn. We stop sending frames
+  // from `speech_end` until playback of the reply has finished.
+  private muted = false;
+  private assistantDone = false;
+  private pendingDecodes = 0;
+  private unmuteTimer: ReturnType<typeof setTimeout> | null = null;
+
   ngOnDestroy(): void {
     this.teardown();
   }
@@ -176,6 +184,9 @@ export class RealtimeCall implements OnDestroy {
     this.error.set(null);
     this.turns.set([]);
     this.liveReply.set('');
+    this.muted = false;
+    this.assistantDone = false;
+    this.pendingDecodes = 0;
     this.status.set('connecting');
     try {
       await this.openSocket();
@@ -232,6 +243,8 @@ export class RealtimeCall implements OnDestroy {
         break;
       case 'speech_end':
         this.phase.set('thinking');
+        // Stop the mic now: the tutor is about to speak and we must not record it.
+        this.muteMic();
         break;
       case 'user_turn':
         this.turns.update((t) => [
@@ -262,7 +275,9 @@ export class RealtimeCall implements OnDestroy {
           },
         ]);
         this.liveReply.set('');
-        this.phase.set('listening');
+        // The last audio_chunk has been sent; resume the mic once it finishes playing.
+        this.assistantDone = true;
+        this.scheduleUnmute();
         break;
       case 'corrections':
         this.attachCorrections(
@@ -293,6 +308,7 @@ export class RealtimeCall implements OnDestroy {
       this.playHead = this.playbackCtx.currentTime;
     }
     const ctx = this.playbackCtx;
+    this.pendingDecodes++;
     ctx.decodeAudioData(this.b64ToBytes(b64))
       .then((buffer) => {
         const source = ctx.createBufferSource();
@@ -302,7 +318,45 @@ export class RealtimeCall implements OnDestroy {
         source.start(startAt);
         this.playHead = startAt + buffer.duration;
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        this.pendingDecodes--;
+        this.scheduleUnmute(); // a late-decoding chunk may extend playback
+      });
+  }
+
+  // --- Mute-while-speaking ---------------------------------------------------
+
+  private muteMic(): void {
+    this.muted = true;
+    this.pcmBuffer = [];
+    if (this.unmuteTimer) {
+      clearTimeout(this.unmuteTimer);
+      this.unmuteTimer = null;
+    }
+  }
+
+  /** Resume the mic once the whole reply has been received and finished playing. */
+  private scheduleUnmute(): void {
+    if (!this.assistantDone || this.pendingDecodes > 0) {
+      return; // more audio still to come or still decoding
+    }
+    if (this.unmuteTimer) {
+      clearTimeout(this.unmuteTimer);
+    }
+    const remainingMs = this.playbackCtx
+      ? Math.max(0, (this.playHead - this.playbackCtx.currentTime) * 1000)
+      : 0;
+    // Small tail guard so the very end of the reply doesn't leak back into the mic.
+    this.unmuteTimer = setTimeout(() => {
+      this.unmuteTimer = null;
+      this.muted = false;
+      this.assistantDone = false;
+      this.pcmBuffer = [];
+      if (this.status() === 'live') {
+        this.phase.set('listening');
+      }
+    }, remainingMs + 250);
   }
 
   private b64ToBytes(b64: string): ArrayBuffer {
@@ -334,6 +388,9 @@ export class RealtimeCall implements OnDestroy {
   }
 
   private onAudioBlock(block: Float32Array, inputRate: number): void {
+    if (this.muted) {
+      return; // the tutor is speaking — don't capture it as the user's turn
+    }
     const resampled = this.resample(block, inputRate, TARGET_RATE);
     for (const s of resampled) {
       this.pcmBuffer.push(s);
@@ -386,6 +443,11 @@ export class RealtimeCall implements OnDestroy {
   }
 
   private teardown(): void {
+    if (this.unmuteTimer) {
+      clearTimeout(this.unmuteTimer);
+      this.unmuteTimer = null;
+    }
+    this.muted = false;
     this.workletNode?.port.close();
     this.workletNode?.disconnect();
     this.workletNode = null;

@@ -93,10 +93,11 @@ Services hold the `db` session and call these functions (`user_repo.create_user(
   module-level `settings = Settings()`.
 - `app/app.py` exposes `get_application() -> FastAPI`: sets the Windows event-loop policy,
   toggles docs by `SystemSettings.env` (`prod` → docs off; else default Swagger at `/docs`),
-  uses `ORJSONResponse`, adds middlewares, includes routers, defines `/health`. A shared
-  `httpx.AsyncClient` is created in the `app_lifespan` and lives on `app.state.http_client`
-  (outbound HTTP — Google OAuth, public-key fetch — uses it). Root `main.py` is just
-  `app = get_application()`. Uvicorn runs **`main:app`**.
+  uses `ORJSONResponse`, adds middlewares, includes routers, defines `/health`. Where a
+  service makes outbound HTTP (auth-service → Google OAuth), a shared `httpx.AsyncClient`
+  is created in the `app_lifespan` on `app.state.http_client` (services without outbound
+  HTTP don't create one). Root `main.py` is just `app = get_application()`. Uvicorn runs
+  **`main:app`**.
 - Global `catch_value_errors` middleware maps `ValueError`→422, `ResponseValidationError`→422,
   anything else→500 (logged). Lives in `utils/middleware.py`.
 - **user-service auth is a middleware** (`jwt_auth`): validates a forwarded access token and
@@ -122,8 +123,9 @@ plural. Indexes follow the table name (e.g. `ix_us_users_email`).
 
 - **Google OAuth2 (Authorization Code) + local email/password.** Own DB (`au_users`);
   profiles stay in user-service (link by `user_id`, no cross-service FK).
-- **JWT signed with RS256.** auth-service holds the private key; other services verify
-  with the public key (no shared secret, no callback to auth). Access + refresh tokens.
+- **JWT signed with RS256.** auth-service holds the private key (`JWT_PRIVATE_KEY` env);
+  other services verify with the public key (`JWT_PUBLIC_KEY` env), distributed
+  out-of-band — no shared secret, no callback to auth. Access + refresh tokens.
 - Ports: API `8001`, Postgres `5433` (user-service uses `8000` / `5432`).
 
 ### Service-to-service
@@ -132,9 +134,11 @@ plural. Indexes follow the table name (e.g. `ix_us_users_email`).
   `docker network create webeng`. Unique service names: `auth-api`/`auth-db`,
   `user-api`/`user-db`. Root `docker-compose.yml` brings everything up via `include`.
 - **JWT validation:** user-service (and future services) verify forwarded access
-  tokens with auth's **public key**, fetched from `GET /auth/public-key` and cached.
-  No shared secret, no per-request callback to auth. Client forwards the access token;
-  each service checks it independently.
+  tokens with auth's **public key**, provided out-of-band via env (`JWT_PUBLIC_KEY`, the
+  RS256 public key PEM); auth signs with `JWT_PRIVATE_KEY`. No shared secret, no runtime
+  key fetch, no per-request callback to auth. Generate a pair once with openssl (see
+  auth-service `.env.example`). Client forwards the access token; each service checks it
+  independently.
 - Security posture: rely on network isolation (internal services not public) + JWT
   propagation. mTLS / service mesh are noted as future work, intentionally not built.
 

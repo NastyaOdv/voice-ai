@@ -1,9 +1,7 @@
 #!/usr/bin/env sh
-# Generate RS256 keys (if missing), apply DB migrations, then start the API.
+# Apply DB migrations, then start the API. Fail fast if migrations fail.
+# JWT keys are provided via env (JWT_PRIVATE_KEY); see .env.example to generate a pair.
 set -e
-
-echo "[entrypoint] ensuring RS256 keys..."
-python -m app.utils.keygen
 
 echo "[entrypoint] applying migrations..."
 alembic upgrade head

@@ -48,9 +48,9 @@ uvicorn on http://localhost:8000. The API does NOT create tables itself; migrati
 
 Health check: http://localhost:8000/health
 
-`GET /me` is a protected example — send `Authorization: Bearer <access_token>` from
-auth-service; user-service validates it with auth's public key (fetched from
-`AUTH_PUBLIC_KEY_URL`) and returns the token's user id.
+`GET /me` is a protected example — the access token is sent by auth-service as an
+httponly cookie; user-service validates it with auth's public key (from the
+`JWT_PUBLIC_KEY` env) and returns the token's user id.
 
 ## Run locally without Docker
 

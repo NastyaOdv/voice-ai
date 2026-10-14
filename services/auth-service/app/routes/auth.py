@@ -23,7 +23,6 @@ from app.utils.exceptions import (
     InvalidToken,
     PasswordNotSet,
 )
-from app.utils.jwt import load_public_key
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -155,9 +154,3 @@ async def change_password(
 @router.get("/me", response_model=UserIdentity)
 async def me(user: User = Depends(get_current_user)) -> User:
     return user
-
-
-@router.get("/public-key")
-async def public_key() -> dict[str, str]:
-    """Expose the RS256 public key so other services can verify our JWTs (JWKS-lite)."""
-    return {"public_key": load_public_key()}

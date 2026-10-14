@@ -36,8 +36,9 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # JWT validation: fetch auth-service's RS256 public key and verify forwarded tokens.
-    auth_public_key_url: str = "http://localhost:8001/auth/public-key"
+    # JWT validation: auth-service's RS256 public key (PEM), used to verify forwarded
+    # tokens. Newlines may be real line breaks or escaped "\n" (friendlier for .env).
+    jwt_public_key: str = ""
     jwt_algorithm: str = "RS256"
 
 

@@ -1,0 +1,50 @@
+# LiteLLM proxy (LLM gateway) with its own dedicated Postgres instance — consistent
+# with the project's database-per-service layout. LiteLLM's Prisma-managed tables live
+# in their own server, fully isolated from the app services' databases.
+#
+# No config.yaml yet: the proxy boots configless (STORE_MODEL_IN_DB=True) — add models
+# later via the admin UI at http://localhost:4000/ui. Brought up by the root compose:
+#   docker compose up --build -d
+services:
+  litellm-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: litellm
+      POSTGRES_DB: litellm
+    ports:
+      - "5435:5432"  # own port, clear of user/auth/orchestrator (5432/5433/5434)
+    volumes:
+      - litellm_db_data:/var/lib/postgresql/data
+    networks:
+      - webeng
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  litellm-api:
+    image: ghcr.io/berriai/litellm:main-stable
+    depends_on:
+      litellm-db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://litellm:litellm@litellm-db:5432/litellm
+      # Local-dev secrets — override in a real deploy.
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-dev}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-sk-salt-local-dev}
+      # Store model/provider config in the DB instead of a config.yaml (add via the UI).
+      STORE_MODEL_IN_DB: "True"
+    ports:
+      - "4000:4000"
+    networks:
+      - webeng
+
+networks:
+  # Shared across all services. Create it once: `docker network create webeng`
+  webeng:
+    external: true
+
+volumes:
+  litellm_db_data:

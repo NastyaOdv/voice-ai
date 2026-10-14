@@ -44,7 +44,7 @@ async def get_current_user_id_ws(websocket: WebSocket) -> uuid.UUID:
             code=status.WS_1008_POLICY_VIOLATION, reason="Not authenticated"
         )
     try:
-        payload = await decode_token(token, websocket.app.state.http_client)
+        payload = decode_token(token)
     except Exception as exc:  # jwt raises several exception types
         raise WebSocketException(
             code=status.WS_1008_POLICY_VIOLATION, reason="Invalid token"

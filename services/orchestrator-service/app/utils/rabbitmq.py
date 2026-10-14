@@ -31,6 +31,10 @@ STT_QUEUE = "stt.rpc"
 LLM_QUEUE = "llm.rpc"
 TTS_QUEUE = "tts.rpc"
 
+# Content type marking a message whose body is a raw binary payload (audio) with its
+# JSON metadata in the `meta` header, rather than a JSON body.
+OCTET_STREAM = "application/octet-stream"
+
 
 class RpcClient:
     def __init__(self, amqp_url: str) -> None:
@@ -63,7 +67,7 @@ class RpcClient:
         if message.correlation_id is None:
             logger.warning("RPC response without correlation_id, dropping")
             return
-        body = orjson.loads(message.body)
+        body = self._decode(message)
 
         # Streaming reply: push the chunk to the waiting generator (may be many).
         stream = self.streams.get(message.correlation_id)
@@ -76,23 +80,55 @@ class RpcClient:
         if future is not None:
             future.set_result(body)
 
+    @staticmethod
+    def _decode(message: AbstractIncomingMessage) -> dict[str, Any]:
+        """Reply body -> dict. A binary reply (content_type octet-stream) carries raw
+        bytes in the body — returned under `audio` — with any JSON metadata in the `meta`
+        header; every other reply is a JSON body."""
+        if getattr(message, "content_type", None) == OCTET_STREAM:
+            meta = (message.headers or {}).get("meta")
+            data: dict[str, Any] = orjson.loads(meta) if meta else {}
+            data["audio"] = bytes(message.body)
+            return data
+        return orjson.loads(message.body)
+
     async def _publish(
-        self, routing_key: str, payload: dict[str, Any], correlation_id: str
+        self,
+        routing_key: str,
+        payload: dict[str, Any],
+        correlation_id: str,
+        audio: bytes | None = None,
     ) -> None:
         assert self.channel is not None and self.callback_queue is not None
-        await self.channel.default_exchange.publish(
-            aio_pika.Message(
+        if audio is None:
+            message = aio_pika.Message(
                 body=orjson.dumps(payload),
                 content_type="application/json",
                 correlation_id=correlation_id,
                 reply_to=self.callback_queue.name,
-            ),
-            routing_key=routing_key,
-        )
+            )
+        else:
+            # Binary payloads travel raw in the body (no base64 tax); the JSON metadata
+            # rides along in a header so one message still carries both.
+            message = aio_pika.Message(
+                body=audio,
+                content_type=OCTET_STREAM,
+                headers={"meta": orjson.dumps(payload).decode()},
+                correlation_id=correlation_id,
+                reply_to=self.callback_queue.name,
+            )
+        await self.channel.default_exchange.publish(message, routing_key=routing_key)
 
     async def call(
-        self, routing_key: str, payload: dict[str, Any], timeout: float = 60.0
+        self,
+        routing_key: str,
+        payload: dict[str, Any],
+        timeout: float = 60.0,
+        *,
+        audio: bytes | None = None,
     ) -> dict[str, Any]:
+        """Classic request/reply. Pass `audio` to send a raw binary payload (with
+        `payload` as its metadata header) instead of a JSON body."""
         if self.channel is None or self.callback_queue is None:
             raise RuntimeError("RpcClient is not connected")
 
@@ -100,7 +136,7 @@ class RpcClient:
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self.futures[correlation_id] = future
         try:
-            await self._publish(routing_key, payload, correlation_id)
+            await self._publish(routing_key, payload, correlation_id, audio=audio)
             return await asyncio.wait_for(future, timeout=timeout)
         finally:
             self.futures.pop(correlation_id, None)

@@ -4,8 +4,6 @@ Transcription is CPU-bound and blocking, so it runs in a thread (asyncio.to_thre
 to keep the event loop responsive. prefetch=1 processes one clip at a time.
 """
 import asyncio
-import base64
-from typing import Any
 
 import aio_pika
 import orjson
@@ -29,8 +27,9 @@ async def connect_with_retry(url: str, attempts: int = 30, delay: float = 2.0) -
 async def process_message(
     channel: AbstractChannel, message: AbstractIncomingMessage
 ) -> None:
-    payload: dict[str, Any] = orjson.loads(message.body)
-    audio = base64.b64decode(payload["audio_b64"])
+    # The request body is the raw audio bytes (no base64/JSON envelope); the reply
+    # stays JSON (the small transcription result).
+    audio = bytes(message.body)
     try:
         result = await asyncio.to_thread(transcriber.transcribe, audio)
         body = orjson.dumps(result)

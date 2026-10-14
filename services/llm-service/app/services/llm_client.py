@@ -1,4 +1,8 @@
-"""Anthropic Claude client for the English tutor.
+"""LLM client for the English tutor, talking to the LiteLLM gateway.
+
+Every call goes to the LiteLLM proxy, never to a provider directly: `llm_model` is a
+LiteLLM alias and which vendor serves it is decided there, so swapping model or provider
+never touches this file.
 
 Returns a STRUCTURED response so the two parts never mix: `spoken_reply` (voiced by
 TTS) and `corrections` (grammar notes, text-only). We use the SDK's `messages.parse`
@@ -6,6 +10,11 @@ with a Pydantic schema so the output is validated against that shape.
 
 Thinking is disabled: this is a short, well-specified structured task, so we keep
 latency and cost down and guarantee the JSON fits in `max_tokens`.
+
+NOTE: `cache_control` and `thinking` below are Anthropic-format fields. A provider that
+does not implement them (e.g. Gemini) ignores them silently and every call is billed
+uncached — the usage log then shows `cache_read=0`. Check what the alias resolves to
+before reading the cache figures.
 """
 from collections.abc import AsyncIterator
 from functools import lru_cache
@@ -23,17 +32,10 @@ FALLBACK_SYSTEM_PROMPT = (
     "point out only GRAMMAR mistakes, each classified by a short grammar 'topic'."
 )
 
-# Fallback prompts for the split realtime pipeline (E4). The orchestrator normally
-# supplies tuned prompts; these keep the worker safe if it ever omits one.
-REPLY_SYSTEM_PROMPT = (
-    "You are a friendly spoken-English tutor on a live voice call. Reply with a single "
-    "natural spoken line that continues the conversation. Do NOT mention grammar "
-    "mistakes or corrections. Do not include internal or system XML tags in your reply."
-)
+REPLY_SYSTEM_PROMPT = "You are a helpful assistant. Reply with a short spoken line."
 CORRECTIONS_SYSTEM_PROMPT = (
-    "You review a language learner's latest message and list only their GRAMMAR "
-    "mistakes, each with a short 'topic', what they said, a better version, and a short "
-    "note. Return an empty list if there are none."
+    "List the grammar mistakes in the user's latest message as objects with 'topic', "
+    "'you_said', 'better' and 'note'. Return an empty list if there are none."
 )
 
 # Said when the model declines to answer, so the pipeline never breaks.
@@ -42,8 +44,12 @@ REFUSAL_REPLY = "Sorry, I couldn't process that. Could you say it again?"
 
 @lru_cache
 def get_client() -> AsyncAnthropic:
-    # Reads ANTHROPIC_API_KEY from the environment.
-    return AsyncAnthropic()
+    # The SDK is used purely as a client for LiteLLM's Anthropic-compatible /v1/messages
+    # endpoint, authenticated with a LiteLLM virtual key. Provider keys live in LiteLLM,
+    # which routes `llm_model` (a public alias) to the actual model — so switching model
+    # or provider is a config change there, not a code change here.
+    settings = get_settings()
+    return AsyncAnthropic(base_url=settings.llm_base_url, api_key=settings.llm_api_key)
 
 
 def build_conversation(
@@ -115,6 +121,16 @@ async def generate_reply(
     system_text = system or FALLBACK_SYSTEM_PROMPT
     conversation = build_conversation(history, user)
 
+    # Context size before the call (~4 chars per token) — use it to calibrate the
+    # history window: how deep the context is and what each part costs.
+    logger.info(
+        "[structured] context: turns=%s sys_tok~%s hist_tok~%s user_tok~%s",
+        len(history) // 2,
+        len(system_text) // 4,
+        sum(len(m.get("content", "")) for m in history) // 4,
+        len(user) // 4,
+    )
+
     response = await get_client().messages.parse(
         model=settings.llm_model,
         max_tokens=settings.llm_max_tokens,
@@ -125,12 +141,21 @@ async def generate_reply(
     )
 
     usage = response.usage
+    # input_tokens counts only what was NOT served from cache, so the real input is
+    # input + cache_write + cache_read. A high cache_hit means the resent history is
+    # being reused; a drop means a cold rebuild (e.g. Redis expired).
+    cache_read = usage.cache_read_input_tokens or 0
+    cache_write = usage.cache_creation_input_tokens or 0
+    total_input = usage.input_tokens + cache_write + cache_read
     logger.info(
-        "LLM usage: input=%s cache_write=%s cache_read=%s output=%s",
+        "[structured] usage: input=%s cache_write=%s cache_read=%s output=%s "
+        "total_input=%s cache_hit=%.0f%%",
         usage.input_tokens,
-        usage.cache_creation_input_tokens,
-        usage.cache_read_input_tokens,
+        cache_write,
+        cache_read,
         usage.output_tokens,
+        total_input,
+        cache_read / total_input * 100 if total_input else 0,
     )
 
     if response.stop_reason == "refusal" or response.parsed_output is None:
@@ -141,16 +166,80 @@ async def generate_reply(
 
 
 async def stream_reply(
-    system: str, history: list[dict[str, str]], user: str
+    system: str, history: list[dict[str, str]], user: str, cache: bool = True
 ) -> AsyncIterator[str]:
     """Stream ONLY the spoken reply as plain text deltas (E4 realtime path).
 
     No structured output here: the orchestrator segments these deltas into sentences and
     voices them as they complete, so the tutor starts speaking before the model finishes.
+
+    `cache=False` sends the same request with no `cache_control` marker anywhere —
+    TEMPORARY, for the history-policy experiment; the orchestrator sets it per policy.
     """
     settings = get_settings()
     system_text = system or REPLY_SYSTEM_PROMPT
     conversation = build_conversation(history, user)
+
+    logger.info(
+        "[stream] context: turns=%s sys_tok~%s hist_tok~%s user_tok~%s cache=%s",
+        len(history) // 2,
+        len(system_text) // 4,
+        sum(len(m.get("content", "")) for m in history) // 4,
+        len(user) // 4,
+        "on" if cache else "off",
+    )
+
+    async with get_client().messages.stream(
+        model=settings.llm_model,
+        max_tokens=settings.llm_max_tokens,
+        thinking={"type": "disabled"},
+        system=cached_system(system_text) if cache else system_text,
+        messages=(  # type: ignore[arg-type]
+            with_history_cache(conversation) if cache else conversation
+        ),
+    ) as stream:
+        async for text in stream.text_stream:
+            yield text
+
+        # Usage is only complete once the stream has finished.
+        usage = (await stream.get_final_message()).usage
+        cache_read = usage.cache_read_input_tokens or 0
+        cache_write = usage.cache_creation_input_tokens or 0
+        total_input = usage.input_tokens + cache_write + cache_read
+        logger.info(
+            "[stream] usage: input=%s cache_write=%s cache_read=%s output=%s "
+            "total_input=%s cache_hit=%.0f%%",
+            usage.input_tokens,
+            cache_write,
+            cache_read,
+            usage.output_tokens,
+            total_input,
+            cache_read / total_input * 100 if total_input else 0,
+        )
+
+
+async def stream_reply_2(
+    system: str, history: list[dict[str, str]], user: str, policy: str = ""
+) -> AsyncIterator[str]:
+    """Same stream as `stream_reply`, for the TOKEN-BUDGET experiment set.
+
+    Split out so the two experiment sets land under different log tags and cannot be
+    mixed up when the runs are compared. Caching is always on here: below the 4096
+    minimum `cache_control` is ignored and costs nothing, and none of the token-budget
+    windows moves its prefix per turn. TEMPORARY, delete with the experiment.
+    """
+    settings = get_settings()
+    system_text = system or REPLY_SYSTEM_PROMPT
+    conversation = build_conversation(history, user)
+
+    logger.info(
+        "[stream2] context: policy=%s turns=%s sys_tok~%s hist_tok~%s user_tok~%s",
+        policy or "?",
+        len(history) // 2,
+        len(system_text) // 4,
+        sum(len(m.get("content", "")) for m in history) // 4,
+        len(user) // 4,
+    )
 
     async with get_client().messages.stream(
         model=settings.llm_model,
@@ -162,6 +251,22 @@ async def stream_reply(
         async for text in stream.text_stream:
             yield text
 
+        usage = (await stream.get_final_message()).usage
+        cache_read = usage.cache_read_input_tokens or 0
+        cache_write = usage.cache_creation_input_tokens or 0
+        total_input = usage.input_tokens + cache_write + cache_read
+        logger.info(
+            "[stream2] usage: policy=%s input=%s cache_write=%s cache_read=%s output=%s "
+            "total_input=%s cache_hit=%.0f%%",
+            policy or "?",
+            usage.input_tokens,
+            cache_write,
+            cache_read,
+            usage.output_tokens,
+            total_input,
+            cache_read / total_input * 100 if total_input else 0,
+        )
+
 
 async def detect_corrections(
     system: str, history: list[dict[str, str]], user: str
@@ -171,6 +276,14 @@ async def detect_corrections(
     system_text = system or CORRECTIONS_SYSTEM_PROMPT
     conversation = build_conversation(history, user)
 
+    logger.info(
+        "[corrections] context: turns=%s sys_tok~%s hist_tok~%s user_tok~%s",
+        len(history) // 2,
+        len(system_text) // 4,
+        sum(len(m.get("content", "")) for m in history) // 4,
+        len(user) // 4,
+    )
+
     response = await get_client().messages.parse(
         model=settings.llm_model,
         max_tokens=settings.llm_max_tokens,
@@ -178,6 +291,21 @@ async def detect_corrections(
         system=cached_system(system_text),
         messages=with_history_cache(conversation),  # type: ignore[arg-type]
         output_format=Corrections,
+    )
+
+    usage = response.usage
+    cache_read = usage.cache_read_input_tokens or 0
+    cache_write = usage.cache_creation_input_tokens or 0
+    total_input = usage.input_tokens + cache_write + cache_read
+    logger.info(
+        "[corrections] usage: input=%s cache_write=%s cache_read=%s output=%s "
+        "total_input=%s cache_hit=%.0f%%",
+        usage.input_tokens,
+        cache_write,
+        cache_read,
+        usage.output_tokens,
+        total_input,
+        cache_read / total_input * 100 if total_input else 0,
     )
 
     if response.stop_reason == "refusal" or response.parsed_output is None:

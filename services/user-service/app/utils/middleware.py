@@ -21,7 +21,7 @@ async def jwt_auth(request: Request, call_next: CallNext) -> Response:
     token = request.cookies.get("access_token")
     if token:
         try:
-            payload = await decode_token(token, request.app.state.http_client)
+            payload = decode_token(token)
         except Exception:  # jwt raises several exception types
             return JSONResponse(status_code=401, content={"detail": "Invalid token"})
         if payload.get("type") != "access":

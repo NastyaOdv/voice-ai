@@ -37,8 +37,7 @@ class Settings(BaseSettings):
     )
 
     jwt_algorithm: str = "RS256"
-    jwt_private_key_path: str = "keys/private.pem"
-    jwt_public_key_path: str = "keys/public.pem"
+    jwt_private_key: str = ""
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
 

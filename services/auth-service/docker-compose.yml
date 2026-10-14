@@ -30,12 +30,12 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8001/auth/google/callback}
+      # RS256 private key (PEM, escaped newlines) that signs the JWTs. Put it in the
+      # root .env (generate a pair with openssl; see .env.example).
+      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY:-}
     ports:
       # Host 8001 to avoid clashing with user-service's API on 8000.
       - "8001:8000"
-    volumes:
-      # Persist the generated RS256 keys across restarts.
-      - auth_keys:/app/keys
     networks:
       - webeng
     depends_on:
@@ -50,4 +50,3 @@ networks:
 
 volumes:
   auth_db_data:
-  auth_keys:

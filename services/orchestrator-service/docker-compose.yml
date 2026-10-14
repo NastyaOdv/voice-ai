@@ -56,8 +56,13 @@ services:
       DB_SSLMODE: disable
       REDIS_URL: redis://orchestrator-redis:6379/0
       RABBITMQ_URL: amqp://guest:guest@orchestrator-rabbitmq:5672/
-      AUTH_PUBLIC_KEY_URL: http://auth-api:8000/auth/public-key
+      # auth-service's RS256 public key (PEM, escaped newlines) to verify JWTs.
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:-}
       STORAGE_DIR: /app/storage/audio
+      # Stepped history window sent to the LLM: cut back to KEEP once past MAX, then let
+      # it grow again — keeps the cached prefix stable between steps. MAX=0 disables it.
+      LLM_HISTORY_MAX_PAIRS: ${LLM_HISTORY_MAX_PAIRS:-40}
+      LLM_HISTORY_KEEP_PAIRS: ${LLM_HISTORY_KEEP_PAIRS:-25}
       ENV: dev
     ports:
       - "8002:8000"

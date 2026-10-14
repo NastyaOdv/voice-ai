@@ -16,7 +16,6 @@ Python + FastAPI, async SQLAlchemy 2.0, PostgreSQL, Alembic. Google OAuth2
 | GET    | `/auth/google/callback` | Handle Google redirect → tokens          |
 | POST   | `/auth/refresh`         | Exchange a refresh token for a new pair  |
 | GET    | `/auth/me`              | Current identity (requires access token) |
-| GET    | `/auth/public-key`      | RS256 public key (for other services)    |
 | GET    | `/health`               | Liveness                                 |
 
 ## Ports (to avoid clashing with user-service)
@@ -27,16 +26,21 @@ Python + FastAPI, async SQLAlchemy 2.0, PostgreSQL, Alembic. Google OAuth2
 ## Run with Docker
 
 ```bash
-# 1. Google credentials (optional for local/password flows, required for Google login)
-cp .env.example .env   # fill GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
+# 1. Generate an RS256 key pair once and paste it into the .env files
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out private.pem
+openssl rsa -in private.pem -pubout -out public.pem
+#   -> private.pem as JWT_PRIVATE_KEY into auth-service/.env (or the root .env)
+#   -> public.pem  as JWT_PUBLIC_KEY  into user-service/.env and orchestrator-service/.env
 
-# 2. up — waits for Postgres, generates RS256 keys, runs migrations, starts API
+# 2. Google credentials (optional for local/password flows, required for Google login)
+cp .env.example .env   # fill GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / JWT_PRIVATE_KEY
+
+# 3. up — waits for Postgres, runs migrations, starts API
 docker compose up --build
 ```
 
-On first start the API container generates an RS256 key pair into the `auth_keys`
-volume (`keys/private.pem`, `keys/public.pem`) and `alembic upgrade head` creates
-`au_users`. The API does NOT create tables itself; migrations do.
+The RS256 keys come from env (`JWT_PRIVATE_KEY`), not from disk. `alembic upgrade head`
+creates `au_users` on start; the API does NOT create tables itself, migrations do.
 
 ## Google OAuth setup
 
@@ -51,9 +55,10 @@ Put the client id/secret in `.env`.
 
 ## JWT strategy
 
-- **RS256**: the auth-service signs with `keys/private.pem`.
-- Other services verify tokens with the **public** key (`keys/public.pem`) — no shared
-  secret, no call back to auth-service. Distribute `public.pem` to those services.
+- **RS256**: the auth-service signs with the private key from `JWT_PRIVATE_KEY` (env).
+- Other services verify tokens with the **public** key from `JWT_PUBLIC_KEY` (env) — no
+  shared secret, no call back to auth-service. Generate a pair with openssl (see above)
+  and distribute `JWT_PUBLIC_KEY` to those services.
 - Access token ~15 min, refresh token ~7 days (configurable in `.env`).
 
 ## Checks (run before committing)

@@ -88,7 +88,7 @@ async def call(
                         await websocket.send_json({"type": "speech_start"})
                     elif event == "end" and utterance:
                         await websocket.send_json({"type": "speech_end"})
-                        wav = pcm16_to_wav(utterance, SAMPLE_RATE)
+                        wav = pcm16_to_wav(utterance, SAMPLE_RATE) #ToDO: wav to ang
                         try:
                             async for turn_event in service.run_turn_realtime(
                                 session_id, user_id, wav

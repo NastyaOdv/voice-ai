@@ -4,8 +4,12 @@ services:
     environment:
       RABBITMQ_URL: amqp://guest:guest@orchestrator-rabbitmq:5672/
       LLM_QUEUE: llm.rpc
-      LLM_MODEL: ${LLM_MODEL:-claude-opus-5}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # A LiteLLM alias — map it to a real model in the LiteLLM UI, not here.
+      LLM_MODEL: ${LLM_MODEL:-tutor-default}
+      # LiteLLM proxy (same webeng network); LLM_API_KEY is a LiteLLM virtual key.
+      # No provider API key is passed in: LiteLLM holds those.
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://litellm-api:4000}
+      LLM_API_KEY: ${LLM_API_KEY:-}
     networks:
       - webeng
 

@@ -8,9 +8,11 @@ include = ["app*"]
 [project]
 name = "llm-service"
 version = "0.1.0"
-description = "LLM worker (Anthropic Claude) — consumes the llm.rpc queue, returns structured tutor replies"
+description = "LLM worker (via the LiteLLM gateway) — consumes the llm.rpc queue, returns structured tutor replies"
 requires-python = ">=3.11"
 dependencies = [
+    # Client for LiteLLM's Anthropic-compatible /v1/messages endpoint — the wire format,
+    # not the provider. Which model/vendor serves a call is decided by LiteLLM.
     "anthropic>=0.49",
     "aio-pika>=9.4",
     "orjson>=3.10",
@@ -41,5 +43,5 @@ plugins = ["pydantic.mypy"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = [
-    "integration: tests that need a real broker or the Anthropic API",
+    "integration: tests that need a real broker or a live LiteLLM proxy",
 ]

@@ -1,22 +1,37 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 import jwt
+from cryptography.hazmat.primitives import serialization
 
 from app.conf.config import get_settings
 
 
+def normalize_pem(raw: str) -> str:
+    """Accept a PEM key with real newlines or escaped `\\n` (as stored in .env/compose)."""
+    return raw.replace("\\n", "\n").strip()
+
+
 @lru_cache
 def load_private_key() -> str:
-    return Path(get_settings().jwt_private_key_path).read_text()
+    key = normalize_pem(get_settings().jwt_private_key)
+    if not key:
+        raise RuntimeError("JWT_PRIVATE_KEY is not configured")
+    return key
 
 
 @lru_cache
 def load_public_key() -> str:
-    return Path(get_settings().jwt_public_key_path).read_text()
+    """Derive the public key from the private one (used to verify our own tokens)."""
+    private_key = serialization.load_pem_private_key(
+        load_private_key().encode(), password=None
+    )
+    return private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
 
 
 def create_token(subject: str, token_type: str, expires_delta: timedelta) -> str:

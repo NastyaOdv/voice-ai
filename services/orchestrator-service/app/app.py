@@ -3,7 +3,6 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import httpx
 import redis.asyncio as aioredis
 from fastapi import FastAPI
 from fastapi.responses import ORJSONResponse
@@ -22,20 +21,16 @@ async def app_lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     logger.info("Application starting up...")
 
-    app.state.http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(10.0), limits=httpx.Limits(max_connections=50)
-    )
     app.state.redis = aioredis.from_url(settings.redis_url)
     app.state.broker = RpcClient(settings.rabbitmq_url)
     await app.state.broker.connect()
-    logger.info("http_client, redis and broker initialized")
+    logger.info("redis and broker initialized")
 
     try:
         yield
     finally:
         await app.state.broker.close()
         await app.state.redis.aclose()
-        await app.state.http_client.aclose()
         logger.info("Application shutdown complete.")
 
 

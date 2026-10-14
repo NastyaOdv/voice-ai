@@ -1,14 +1,3 @@
-"""RabbitMQ worker: consume the llm.rpc queue, call Claude, reply to reply_to.
-
-Three request shapes, selected by an optional `mode` field:
-  - (no mode)          v1 structured turn
-                       -> { "spoken_reply": "...", "corrections": [...] }  (one reply)
-  - mode="stream_reply" realtime reply stream (E4)
-                       -> many { "delta": "..." } then { "done": true, "text": "..." }
-  - mode="corrections"  realtime second pass (E4)
-                       -> { "corrections": [{"topic","you_said","better","note"}] }
-All share `{ "system": "...", "history": [{role,content}...], "user": "..." }`.
-"""
 import asyncio
 from typing import Any
 
@@ -46,6 +35,8 @@ async def handle_stream_reply(
             system=payload.get("system", ""),
             history=payload.get("history", []),
             user=payload["user"],
+            # TEMPORARY: history-policy experiment. Absent flag keeps caching on.
+            cache=payload.get("cache", True),
         ):
             parts.append(delta)
             await publish(channel, message, orjson.dumps({"delta": delta}))
@@ -53,6 +44,27 @@ async def handle_stream_reply(
         logger.info(f"LLM stream reply: {len(parts)} deltas, {sum(map(len, parts))} chars")
     except Exception as exc:
         logger.exception("LLM stream reply failed")
+        await publish(channel, message, orjson.dumps({"error": str(exc)}))
+
+
+async def handle_stream_reply_2(
+    channel: AbstractChannel, message: AbstractIncomingMessage, payload: dict[str, Any]
+) -> None:
+    """Stream handler for the TOKEN-BUDGET experiment set. TEMPORARY."""
+    parts: list[str] = []
+    try:
+        async for delta in llm_client.stream_reply_2(
+            system=payload.get("system", ""),
+            history=payload.get("history", []),
+            user=payload["user"],
+            policy=payload.get("policy", ""),
+        ):
+            parts.append(delta)
+            await publish(channel, message, orjson.dumps({"delta": delta}))
+        await publish(channel, message, orjson.dumps({"done": True, "text": "".join(parts)}))
+        logger.info(f"LLM stream reply 2: {len(parts)} deltas, {sum(map(len, parts))} chars")
+    except Exception as exc:
+        logger.exception("LLM stream reply 2 failed")
         await publish(channel, message, orjson.dumps({"error": str(exc)}))
 
 
@@ -114,6 +126,8 @@ async def process_message(
     mode = payload.get("mode")
     if mode == "stream_reply":
         await handle_stream_reply(channel, message, payload)
+    elif mode == "stream_reply_2":          # TEMPORARY: token-budget experiment
+        await handle_stream_reply_2(channel, message, payload)
     elif mode == "corrections":
         await handle_corrections(channel, message, payload)
     else:

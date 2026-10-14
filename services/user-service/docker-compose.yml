@@ -27,7 +27,8 @@ services:
       DB_HOST: user-db
       DB_PORT: "5432"
       DB_SSLMODE: disable
-      AUTH_PUBLIC_KEY_URL: http://auth-api:8000/auth/public-key
+      # auth-service's RS256 public key (PEM, escaped newlines) to verify JWTs.
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:-}
     ports:
       - "8000:8000"
     networks:

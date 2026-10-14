@@ -3,7 +3,6 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import FastAPI
 from fastapi.responses import ORJSONResponse
 
@@ -16,15 +15,10 @@ from app.utils.middleware import catch_value_errors, jwt_auth
 @asynccontextmanager
 async def app_lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Application starting up...")
-    app.state.http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(10.0), limits=httpx.Limits(max_connections=50)
-    )
-    logger.info("httpx.AsyncClient initialized")
     try:
         yield
     finally:
-        await app.state.http_client.aclose()
-        logger.info("httpx.AsyncClient closed. Application shutdown complete.")
+        logger.info("Application shutdown complete.")
 
 
 def get_application() -> FastAPI:

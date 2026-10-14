@@ -32,8 +32,25 @@ def make_connected_client(monkeypatch) -> RpcClient:
 
 
 def reply(correlation_id: str, body: dict) -> SimpleNamespace:
-    """A stand-in for an aio_pika incoming message."""
-    return SimpleNamespace(correlation_id=correlation_id, body=orjson.dumps(body))
+    """A stand-in for an aio_pika incoming JSON message."""
+    return SimpleNamespace(
+        correlation_id=correlation_id,
+        body=orjson.dumps(body),
+        content_type="application/json",
+        headers={},
+    )
+
+
+def binary_reply(
+    correlation_id: str, audio: bytes, meta: dict | None = None
+) -> SimpleNamespace:
+    """A stand-in for a binary reply: raw bytes in the body, JSON meta in a header."""
+    return SimpleNamespace(
+        correlation_id=correlation_id,
+        body=audio,
+        content_type="application/octet-stream",
+        headers={"meta": orjson.dumps(meta).decode()} if meta else {},
+    )
 
 
 async def _wait_registered(client: RpcClient, corr: str) -> None:
@@ -104,3 +121,27 @@ async def test_call_still_returns_single_reply(monkeypatch):
         await asyncio.sleep(0)
     await client.on_response(reply(FIXED_CORR, {"text": "hello"}))
     assert await asyncio.wait_for(task, timeout=1) == {"text": "hello"}
+
+
+async def test_call_sends_binary_body_and_decodes_binary_reply(monkeypatch):
+    """`audio=` publishes raw bytes + a JSON `meta` header (no base64), and a binary
+    reply decodes back to a dict carrying the raw bytes under `audio`."""
+    client = make_connected_client(monkeypatch)
+    task = asyncio.create_task(
+        client.call("stt.rpc", {"lang": "en"}, audio=b"\x00\x01\x02\xff")
+    )
+    for _ in range(100):
+        if FIXED_CORR in client.futures:
+            break
+        await asyncio.sleep(0)
+
+    # request: raw bytes in the body, JSON metadata in the `meta` header
+    published = client.channel.default_exchange.publish.call_args
+    message = published.args[0]
+    assert message.body == b"\x00\x01\x02\xff"
+    assert message.content_type == "application/octet-stream"
+    assert orjson.loads(message.headers["meta"]) == {"lang": "en"}
+
+    # reply: raw WAV bytes come back as {"audio": b"..."}
+    await client.on_response(binary_reply(FIXED_CORR, b"WAVE-bytes"))
+    assert await asyncio.wait_for(task, timeout=1) == {"audio": b"WAVE-bytes"}

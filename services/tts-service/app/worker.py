@@ -4,10 +4,10 @@ Synthesis is CPU-bound and blocking, so it runs in a thread (asyncio.to_thread) 
 keep the event loop responsive. prefetch=1 processes one request at a time.
 
 Contract:
-  { "text": "..." }  ->  { "audio_b64": "<base64 WAV>" }
+  { "text": "..." }  ->  raw WAV bytes (content_type application/octet-stream);
+                          on failure, a JSON body { "error": "..." }
 """
 import asyncio
-import base64
 from typing import Any
 
 import aio_pika
@@ -38,18 +38,21 @@ async def process_message(
     text: str = payload["text"]
     try:
         wav = await asyncio.to_thread(synthesizer.synthesize, text)
-        body = orjson.dumps({"audio_b64": base64.b64encode(wav).decode()})
+        # Reply with the raw WAV bytes — no base64, no JSON envelope.
+        body = wav
+        content_type = "application/octet-stream"
         logger.info(f"Synthesized {len(text)} chars -> {len(wav)} bytes WAV")
     except Exception as exc:
         logger.exception("Synthesis failed")
         body = orjson.dumps({"error": str(exc)})
+        content_type = "application/json"
 
     if message.reply_to is not None:
         await channel.default_exchange.publish(
             aio_pika.Message(
                 body=body,
                 correlation_id=message.correlation_id,
-                content_type="application/json",
+                content_type=content_type,
             ),
             routing_key=message.reply_to,
         )

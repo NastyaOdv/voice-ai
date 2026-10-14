@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.conf.config import get_settings
 from app.logger.logger_config import logger
 from app.models import Correction, Session, Turn
 from app.repositories import correction_repo, session_repo, turn_repo
@@ -14,6 +15,7 @@ from app.services.mistake_service import MistakeService
 from app.utils import audio_storage, redis_cache
 from app.utils.audio import concat_wavs
 from app.utils.exceptions import NotSessionOwner, SessionClosed, SessionNotFound
+from app.utils.history import trim_history, trim_history_tokens
 from app.utils.rabbitmq import LLM_QUEUE, STT_QUEUE, TTS_QUEUE, RpcClient
 from app.utils.text import SentenceAggregator
 from app.utils.topic_catalog import load_topic_catalog
@@ -29,8 +31,9 @@ SYSTEM_PROMPT = (
 # Realtime (E4) splits the one structured call into two: a streamed conversational reply
 # and a separate corrections pass. Each gets its own focused system prompt.
 REALTIME_REPLY_PROMPT = (
-    "You are a friendly spoken-English tutor on a live voice call. Reply with a single "
-    "natural spoken line that continues the conversation. Do NOT mention grammar "
+    "You are a friendly spoken-English tutor on a live voice call. Reply with one or two "
+    "natural spoken sentences that continue the conversation, and ALWAYS end your reply "
+    "with a question that invites the learner to keep talking. Do NOT mention grammar "
     "mistakes or corrections. Do not include internal or system XML tags in your reply."
 )
 CORRECTIONS_PROMPT = (
@@ -38,6 +41,95 @@ CORRECTIONS_PROMPT = (
     "an object with 'topic', 'you_said', 'better' and 'note'. Return an empty list if "
     "there are none."
 )
+
+# Voiced back (and shown) when STT detects a non-English utterance: the tutor supports
+# English only, so we skip the LLM entirely and just speak this line.
+ENGLISH_ONLY_REPLY = (
+    "I can only understand English right now. Could you say that again in English?"
+)
+
+
+# ---------------------------------------------------------------------------
+# TEMPORARY — history-policy experiment for the cost write-up. Delete when done,
+# together with the `cache` flag it puts in the llm.rpc payload.
+#
+# One policy per run: set REPLY_POLICY, rebuild orchestrator-api, drive a session,
+# read the [stream] lines out of the llm-worker log. Only the spoken reply is under
+# test — the corrections pass sends no history at all, so it is unaffected.
+#
+#   (max_pairs, keep_pairs, use_cache);  max_pairs = 0 means no trimming.
+#   max_pairs = keep_pairs + 1 makes the window slide one pair per turn, which is
+#   the "strict limit" shape; a wider gap makes it step.
+# ---------------------------------------------------------------------------
+
+REPLY_POLICIES: dict[str, tuple[int, int, bool]] = {
+    "1_no_limit_no_cache": (0, 0, False),
+    "2_no_limit_cache": (0, 0, True),
+    "3_trim_20_no_cache": (21, 20, False),
+    "4_trim_20_cache": (21, 20, True),
+    "5_step_25_40": (40, 25, True),   # what the service shipped with
+    "6_step_45_60": (60, 45, True),   # predicted to clear the 4096 cache minimum
+}
+
+REPLY_POLICY = "3_trim_20_no_cache"
+
+
+def reply_policy(messages: list[dict[str, str]]) -> tuple[list[dict[str, str]], bool]:
+    """History to send with the spoken reply, and whether to ask for prompt caching.
+
+    `messages` is the full context including the system prompt at index 0, matching
+    `SessionService.llm_history`.
+    """
+    max_pairs, keep_pairs, use_cache = REPLY_POLICIES[REPLY_POLICY]
+    history = trim_history(messages[1:], max_pairs=max_pairs, keep_pairs=keep_pairs)
+    return history, use_cache
+
+
+# ---------------------------------------------------------------------------
+# TEMPORARY — second experiment set, windows measured in TOKENS.
+#
+# The first set is expressed in turns, which turned out not to control anything: one
+# exchange measured 100 tokens in one session and 222 in another, so the same setting
+# landed above the 4096 cache minimum in one conversation and below it in the next.
+# These windows are measured in the unit the price and the cache minimum use.
+#
+# Caching is on for all of them: below the minimum `cache_control` is ignored and costs
+# nothing, and none of these windows moves its prefix per turn, so there is no case here
+# where it would hurt. The first set already carries the cache-off control runs.
+#
+#   (keep_tokens, max_tokens, min_pairs, pin_pairs);  max_tokens = 0 means no trimming.
+#   keep_tokens is chosen so that sys(82) + history + a short user turn stays clear of
+#   4096 even right after a cut.
+# ---------------------------------------------------------------------------
+
+REPLY_POLICIES_2: dict[str, tuple[int, int, int, int]] = {
+    "A_budget_floor": (4600, 6100, 8, 0),
+    "B_budget_pinned": (4600, 6100, 8, 2),
+    "D_no_trim": (0, 0, 0, 0),
+}
+
+REPLY_POLICY_2 = "A_budget_floor"
+
+# Which experiment set runs: False = the turn-based set above, True = this one.
+USE_POLICY_SET_2 = True
+
+
+def reply_policy_2(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """History to send with the spoken reply under the token-budget experiment."""
+    keep_tokens, max_tokens, min_pairs, pin_pairs = REPLY_POLICIES_2[REPLY_POLICY_2]
+    return trim_history_tokens(
+        messages[1:],
+        keep_tokens=keep_tokens,
+        max_tokens=max_tokens,
+        min_pairs=min_pairs,
+        pin_pairs=pin_pairs,
+    )
+
+
+def is_english(language: str | None) -> bool:
+    """Whether an STT-detected language counts as English. Unknown (None) passes through
+    so a failed detection never blocks a genuine English turn."""
+    return language is None or language.split("-")[0].lower() == "en"
 
 
 def turn_audio_url(session_id: uuid.UUID, turn_id: uuid.UUID) -> str:
@@ -75,6 +167,16 @@ class SessionService:
             f"(copy the wording verbatim; choose the single closest one):\n{topics_block}"
         )
 
+    def llm_history(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        """The conversation turns to send the LLM: everything after the system prompt,
+        bounded by the stepped window. The untrimmed context stays in Redis/Postgres."""
+        settings = get_settings()
+        return trim_history(
+            messages[1:],
+            max_pairs=settings.llm_history_max_pairs,
+            keep_pairs=settings.llm_history_keep_pairs,
+        )
+
     async def start_session(self, user_id: uuid.UUID) -> Session:
         session_row = Session(user_id=user_id, status="active")
         session_row = await session_repo.create_session(self.db, session_row)
@@ -104,14 +206,10 @@ class SessionService:
         if session_row.status != "active":
             raise SessionClosed()
 
-        # 1) STT: audio -> verbatim text (+ detected language)
-        stt_reply = await self.broker.call(
-            STT_QUEUE, {"audio_b64": base64.b64encode(audio_bytes).decode()}
-        )
+        stt_reply = await self.broker.call(STT_QUEUE, {}, audio=audio_bytes)
         transcript: str = stt_reply["text"]
         language: str | None = stt_reply.get("language")
 
-        # 2) persist the user turn and its audio
         user_turn_id = uuid.uuid4()
         user_audio_path = audio_storage.save_audio(session_id, user_turn_id, audio_bytes)
         user_turn = await turn_repo.create_turn(
@@ -126,27 +224,37 @@ class SessionService:
             ),
         )
 
-        # 3) LLM: full context -> structured reply. Rebuild context from the DB if the
-        #    Redis cache has expired mid-session. We own the domain content and state
-        #    (system[0] + history); the LLM service assembles the vendor request.
-        messages = await redis_cache.get_messages(self.redis, session_id)
-        if not messages:
-            messages = [{"role": "system", "content": await self.build_system_prompt()}]
-            for past in await turn_repo.list_turns_by_session(self.db, session_id):
-                messages.append({"role": past.role, "content": past.text})
-        llm_reply = await self.broker.call(
-            LLM_QUEUE,
-            {
-                "system": messages[0]["content"],
-                "history": messages[1:],
-                "user": transcript,
-            },
-        )
-        spoken_reply: str = llm_reply["spoken_reply"]
+        # English only: a non-English turn skips the LLM and never touches the tutor's
+        # rolling context; everything below (corrections, persistence, TTS) is shared.
+        if is_english(language):
+            messages = await redis_cache.get_messages(self.redis, session_id)
+            if not messages:
+                messages = [{"role": "system", "content": await self.build_system_prompt()}]
+                for past in await turn_repo.list_turns_by_session(self.db, session_id):
+                    messages.append({"role": past.role, "content": past.text})
+            llm_reply = await self.broker.call(
+                LLM_QUEUE,
+                {
+                    "system": messages[0]["content"],
+                    "history": self.llm_history(messages),
+                    "user": transcript,
+                },
+            )
+            spoken_reply: str = llm_reply["spoken_reply"]
+            raw_corrections = llm_reply.get("corrections", [])
+            await redis_cache.set_messages(
+                self.redis,
+                session_id,
+                messages
+                + [
+                    {"role": "user", "content": transcript},
+                    {"role": "assistant", "content": spoken_reply},
+                ],
+            )
+        else:
+            spoken_reply = ENGLISH_ONLY_REPLY
+            raw_corrections = []
 
-        # 4) persist the LLM's work FIRST — grammar corrections + the assistant reply
-        #    text — so it is never lost if TTS is slow or unavailable.
-        raw_corrections = llm_reply.get("corrections", [])
         corrections = await correction_repo.create_corrections(
             self.db,
             [
@@ -160,7 +268,6 @@ class SessionService:
                 for item in raw_corrections
             ],
         )
-        # Also log each mistake against the user (per-user error profile across sessions).
         await MistakeService(self.db).log_mistakes(
             user_id, session_id, user_turn.id, raw_corrections
         )
@@ -176,26 +283,12 @@ class SessionService:
                 audio_path=assistant_audio_path,
             ),
         )
-
-        # 5) refresh the hot context in Redis (system[0] + full turn history)
-        await redis_cache.set_messages(
-            self.redis,
-            session_id,
-            messages
-            + [
-                {"role": "user", "content": transcript},
-                {"role": "assistant", "content": spoken_reply},
-            ],
-        )
-
-        # 6) TTS is best-effort: voice the spoken_reply if a worker is available, but
-        #    never block the reply on it (short timeout so a missing worker fails fast).
         try:
             tts_reply = await self.broker.call(
                 TTS_QUEUE, {"text": spoken_reply}, timeout=8.0
             )
             audio_storage.save_audio(
-                session_id, assistant_turn_id, base64.b64decode(tts_reply["audio_b64"])
+                session_id, assistant_turn_id, tts_reply["audio"]
             )
         except Exception:
             logger.warning("TTS unavailable; assistant reply saved without audio")
@@ -211,9 +304,7 @@ class SessionService:
         -> `audio` (after TTS, best-effort). Persistence is identical to `add_turn`.
         """
         # 1) STT
-        stt_reply = await self.broker.call(
-            STT_QUEUE, {"audio_b64": base64.b64encode(audio_bytes).decode()}
-        )
+        stt_reply = await self.broker.call(STT_QUEUE, {}, audio=audio_bytes)
         transcript: str = stt_reply["text"]
         language: str | None = stt_reply.get("language")
 
@@ -250,7 +341,7 @@ class SessionService:
             LLM_QUEUE,
             {
                 "system": messages[0]["content"],
-                "history": messages[1:],
+                "history": self.llm_history(messages),
                 "user": transcript,
             },
         )
@@ -318,7 +409,7 @@ class SessionService:
                 TTS_QUEUE, {"text": spoken_reply}, timeout=8.0
             )
             audio_storage.save_audio(
-                session_id, assistant_turn_id, base64.b64decode(tts_reply["audio_b64"])
+                session_id, assistant_turn_id, tts_reply["audio"]
             )
             yield {
                 "type": "audio",
@@ -328,11 +419,11 @@ class SessionService:
         except Exception:
             logger.warning("TTS unavailable; assistant reply saved without audio")
 
-    async def _synthesize(self, text: str) -> str | None:
-        """Best-effort per-sentence TTS: base64 WAV, or None if a worker is unavailable."""
+    async def _synthesize(self, text: str) -> bytes | None:
+        """Best-effort per-sentence TTS: raw WAV bytes, or None if a worker is unavailable."""
         try:
             reply = await self.broker.call(TTS_QUEUE, {"text": text}, timeout=8.0)
-            return str(reply["audio_b64"])
+            return bytes(reply["audio"])
         except Exception:
             logger.warning("TTS unavailable for a sentence; skipping its audio")
             return None
@@ -348,9 +439,7 @@ class SessionService:
         finished writing; grammar corrections are computed by a separate call in parallel.
         """
         # 1) STT
-        stt_reply = await self.broker.call(
-            STT_QUEUE, {"audio_b64": base64.b64encode(audio_bytes).decode()}
-        )
+        stt_reply = await self.broker.call(STT_QUEUE, {}, audio=audio_bytes)
         transcript: str = stt_reply["text"].strip()
         language: str | None = stt_reply.get("language")
 
@@ -383,60 +472,97 @@ class SessionService:
             "created_at": user_turn.created_at.isoformat(),
         }
 
-        # 3) rebuild the conversation history (Redis hot context, or from the DB)
-        messages = await redis_cache.get_messages(self.redis, session_id)
-        if not messages:
-            messages = [{"role": "system", "content": await self.build_system_prompt()}]
-            for past in await turn_repo.list_turns_by_session(self.db, session_id):
-                messages.append({"role": past.role, "content": past.text})
-        history = messages[1:]
-
-        # 4) corrections run in parallel (network only — no DB touch off the main coroutine)
-        corrections_task = asyncio.create_task(
-            self.broker.call(
-                LLM_QUEUE,
-                {
-                    "mode": "corrections",
-                    "system": await self.build_corrections_prompt(),
-                    "history": history,
-                    "user": transcript,
-                },
-            )
-        )
-
-        # 5) stream the spoken reply; voice each finished sentence as it completes
-        aggregator = SentenceAggregator()
+        # 3) voice() is shared; only how we produce the reply differs by language.
         audio_chunks: list[bytes] = []
-        reply_parts: list[str] = []
-        reply_system = REALTIME_REPLY_PROMPT
 
         async def voice(sentence: str) -> AsyncIterator[dict]:
-            audio_b64 = await self._synthesize(sentence)
-            if audio_b64 is not None:
-                audio_chunks.append(base64.b64decode(audio_b64))
-                yield {"type": "audio_chunk", "text": sentence, "audio_b64": audio_b64}
+            wav = await self._synthesize(sentence)
+            if wav is not None:
+                audio_chunks.append(wav)
+                yield {
+                    "type": "audio_chunk",
+                    "text": sentence,
+                    "audio_b64": base64.b64encode(wav).decode(),
+                }
 
-        async for chunk in self.broker.call_stream(
-            LLM_QUEUE,
-            {"mode": "stream_reply", "system": reply_system, "history": history, "user": transcript},
-        ):
-            delta = chunk.get("delta", "")
-            if not delta:
-                continue
-            reply_parts.append(delta)
-            yield {"type": "reply_delta", "text": delta}
-            for sentence in aggregator.feed(delta):
-                async for event in voice(sentence):
+        if is_english(language):
+            # rebuild the conversation history (Redis hot context, or from the DB)
+            messages = await redis_cache.get_messages(self.redis, session_id)
+            if not messages:
+                messages = [{"role": "system", "content": await self.build_system_prompt()}]
+                for past in await turn_repo.list_turns_by_session(self.db, session_id):
+                    messages.append({"role": past.role, "content": past.text})
+            # TEMPORARY: the experiment picks the window and the caching flag.
+            # Restore `history = self.llm_history(messages)` when it is over.
+            # Flip USE_POLICY_SET_2 to run the token-budget set instead of the turn set.
+            if USE_POLICY_SET_2:
+                history, use_cache, mode = reply_policy_2(messages), True, "stream_reply_2"
+            else:
+                history, use_cache = reply_policy(messages)
+                mode = "stream_reply"
+
+            # corrections run in parallel (network only — no DB touch off the main coroutine).
+            # No history: the pass grades the learner's latest message on its own, so the
+            # conversation adds input tokens and latency without changing the verdict.
+            # Only `stream` keeps the history it needs to hold a conversation.
+            corrections_task: asyncio.Task[dict] | None = asyncio.create_task(
+                self.broker.call(
+                    LLM_QUEUE,
+                    {
+                        "mode": "corrections",
+                        "system": await self.build_corrections_prompt(),
+                        "history": [],
+                        "user": transcript,
+                    },
+                )
+            )
+
+            # stream the spoken reply; voice each finished sentence as it completes
+            aggregator = SentenceAggregator()
+            reply_parts: list[str] = []
+            async for chunk in self.broker.call_stream(
+                LLM_QUEUE,
+                {
+                    "mode": mode,  # TEMPORARY: experiment picks the handler
+                    "system": REALTIME_REPLY_PROMPT,
+                    "history": history,
+                    "user": transcript,
+                    "cache": use_cache,  # TEMPORARY: experiment flag
+                    "policy": REPLY_POLICY_2 if USE_POLICY_SET_2 else REPLY_POLICY,
+                },
+            ):
+                delta = chunk.get("delta", "")
+                if not delta:
+                    continue
+                reply_parts.append(delta)
+                yield {"type": "reply_delta", "text": delta}
+                for sentence in aggregator.feed(delta):
+                    async for event in voice(sentence):
+                        yield event
+            tail = aggregator.flush()
+            if tail:
+                async for event in voice(tail):
                     yield event
+            spoken_reply = "".join(reply_parts).strip()
 
-        tail = aggregator.flush()
-        if tail:
-            async for event in voice(tail):
+            # only a real (English) turn updates the tutor's rolling context
+            await redis_cache.set_messages(
+                self.redis,
+                session_id,
+                messages
+                + [
+                    {"role": "user", "content": transcript},
+                    {"role": "assistant", "content": spoken_reply},
+                ],
+            )
+        else:
+            # English only: skip the LLM entirely and voice one canned line.
+            corrections_task = None
+            spoken_reply = ENGLISH_ONLY_REPLY
+            async for event in voice(spoken_reply):
                 yield event
 
-        spoken_reply = "".join(reply_parts).strip()
-
-        # 6) persist the assistant turn + concatenated audio; refresh Redis context
+        # persist the assistant turn + concatenated audio
         assistant_turn_id = uuid.uuid4()
         assistant_audio_path: str | None = None
         if audio_chunks:
@@ -453,15 +579,6 @@ class SessionService:
                 audio_path=assistant_audio_path,
             ),
         )
-        await redis_cache.set_messages(
-            self.redis,
-            session_id,
-            messages
-            + [
-                {"role": "user", "content": transcript},
-                {"role": "assistant", "content": spoken_reply},
-            ],
-        )
         yield {
             "type": "assistant_done",
             "id": str(assistant_turn_id),
@@ -474,9 +591,13 @@ class SessionService:
             "created_at": assistant_turn.created_at.isoformat(),
         }
 
-        # 7) corrections: persist + emit once the parallel pass returns
-        corr_reply = await corrections_task
-        raw_corrections = corr_reply.get("corrections", [])
+        # 7) corrections: persist + emit once the parallel pass returns (none for a
+        # non-English turn, which never ran the LLM)
+        raw_corrections = (
+            (await corrections_task).get("corrections", [])
+            if corrections_task is not None
+            else []
+        )
         corrections = await correction_repo.create_corrections(
             self.db,
             [

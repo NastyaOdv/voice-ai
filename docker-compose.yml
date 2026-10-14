@@ -8,3 +8,4 @@ include:
   - services/stt-service/docker-compose.yml
   - services/llm-service/docker-compose.yml
   - services/tts-service/docker-compose.yml
+  - services/litellm/docker-compose.yml

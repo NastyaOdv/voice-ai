@@ -11,5 +11,5 @@ RUN pip install --no-cache-dir .
 
 EXPOSE 8000
 
-# entrypoint: generate JWT keys if missing -> run migrations -> start uvicorn.
+# entrypoint: run migrations -> start uvicorn. JWT keys come from env (JWT_PRIVATE_KEY).
 ENTRYPOINT ["sh", "./entrypoint.sh"]

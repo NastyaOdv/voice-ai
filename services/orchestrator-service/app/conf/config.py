@@ -41,14 +41,11 @@ class Settings(BaseSettings):
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
 
     storage_dir: str = "storage/audio"
-
-    # Realtime-call VAD: how long a silence (ms) ends the learner's utterance, and how
-    # aggressively webrtcvad classifies speech (0=lenient .. 3=aggressive).
-    vad_end_silence_ms: int = 1000
-    vad_aggressiveness: int = 2
-
-    # JWT validation: fetch auth-service's RS256 public key and verify forwarded tokens.
-    auth_public_key_url: str = "http://localhost:8001/auth/public-key"
+    llm_history_max_pairs: int = 40
+    llm_history_keep_pairs: int = 25
+    vad_end_silence_ms: int = 700
+    vad_aggressiveness: int = 3
+    jwt_public_key: str = ""
     jwt_algorithm: str = "RS256"
 
 
